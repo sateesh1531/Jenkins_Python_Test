@@ -1,0 +1,109 @@
+pipeline {
+    agent any
+
+    triggers {
+        githubPush()
+    }
+
+    environment {
+        IMAGE_NAME = "hello-pod-python"
+        CONTAINER_NAME = "hello-pod"
+        APP_PORT = "8081"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Python Build and Validation') {
+            steps {
+                dir('hello-pod-python') {
+                    sh '''
+                        python3 -m venv venv
+                        . venv/bin/activate
+                        pip install -r requirements.txt
+                        python -m py_compile app.py
+                    '''
+                }
+            }
+        }
+
+        stage('Create Python Artifact') {
+            steps {
+                dir('hello-pod-python') {
+                    sh '''
+                        mkdir -p dist
+
+                        tar --exclude=venv \
+                            --exclude=dist \
+                            -czf dist/hello-pod-python-${BUILD_NUMBER}.tar.gz \
+                            app.py requirements.txt Dockerfile
+                    '''
+                }
+
+                archiveArtifacts artifacts: 'hello-pod-python/dist/*.tar.gz',
+                                 fingerprint: true
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                dir('hello-pod-python') {
+                    sh '''
+                        docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+                        docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Container') {
+            steps {
+                sh '''
+                    docker rm -f ${CONTAINER_NAME} || true
+
+                    docker run -d \
+                        --name ${CONTAINER_NAME} \
+                        --restart unless-stopped \
+                        -p ${APP_PORT}:5000 \
+                        ${IMAGE_NAME}:latest
+                '''
+            }
+        }
+
+        stage('Verify Application') {
+            steps {
+                sh '''
+                    for i in $(seq 1 15); do
+                        if curl -fsS http://localhost:${APP_PORT}/; then
+                            echo "Application is running!"
+                            curl -fsS http://localhost:${APP_PORT}/health
+                            exit 0
+                        fi
+                        sleep 2
+                    done
+
+                    docker logs ${CONTAINER_NAME}
+                    exit 1
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Python artifact created successfully!'
+            echo 'Docker image built successfully!'
+            echo 'Application deployed successfully!'
+            echo 'Endpoint: http://localhost:8081'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check Jenkins console output.'
+        }
+    }
+}
